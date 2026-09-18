@@ -857,6 +857,40 @@ async def test_multipart_formdata_file(protocol) -> None:
     result["a_file"].file.close()
 
 
+async def test_multipart_formdata_max_size_checked_while_reading(protocol) -> None:
+    # An oversized ordinary (non-file) field must be rejected while it is being
+    # read, not after the whole field has been accumulated in memory.
+    max_size = 1024
+    field_size = 256 * 1024
+    payload = StreamReader(protocol, 2**16, loop=asyncio.get_event_loop())
+    payload.feed_data(
+        b"-----------------------------326931944431359\r\n"
+        b'Content-Disposition: form-data; name="a"\r\n'
+        b"\r\n" + b"x" * field_size + b"\r\n"
+        b"-----------------------------326931944431359--\r\n"
+    )
+    content_type = (
+        "multipart/form-data; boundary=---------------------------326931944431359"
+    )
+    payload.feed_eof()
+    req = make_mocked_request(
+        "POST",
+        "/",
+        headers={"CONTENT-TYPE": content_type},
+        payload=payload,
+        client_max_size=max_size,
+    )
+    with pytest.raises(HTTPRequestEntityTooLarge) as err:
+        await req.post()
+
+    assert err.value.status_code == 413
+    # The reported size proves the limit fired after a single chunk was read
+    # instead of after the entire field was buffered.
+    assert err.value.text is not None
+    actual_size = int(err.value.text.split()[-1])
+    assert max_size < actual_size < field_size
+
+
 async def test_make_too_big_request_limit_None(protocol) -> None:
     payload = StreamReader(protocol, 2**16, loop=asyncio.get_event_loop())
     large_file = 1024**2 * b"x"
