@@ -1,15 +1,18 @@
 name: Labels
 on:
-  pull_request:
-    branches:
-      - 'master'
-    types: [labeled, opened, synchronize, reopened, unlabeled]
+  workflow_dispatch:
 
 jobs:
   backport:
+    timeout-minutes: 15
     runs-on: ubuntu-latest
     name: Backport label added
-    if: ${{ github.event.pull_request.user.type != 'Bot' }}
+    # Seal: this job asserts a "backport" label on the triggering pull request.
+    # The fork only ever dispatches workflows manually, so there is no pull
+    # request in the event payload and the job can never do anything but error.
+    # Disabled the same way `lint` is in ci-cd.yml; it builds nothing and tests
+    # nothing.
+    if: false
     steps:
       - uses: actions/github-script@v8
         with:

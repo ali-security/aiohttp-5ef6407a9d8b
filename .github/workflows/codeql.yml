@@ -1,17 +1,11 @@
 name: "CodeQL"
 
 on:
-  push:
-    branches:
-      - 'master'
-      - '[0-9].[0-9]+'  # matches to backport branches, e.g. 3.6
-  pull_request:
-    branches: [ "master" ]
-  schedule:
-    - cron: "9 1 * * 4"
+  workflow_dispatch:
 
 jobs:
   analyze:
+    timeout-minutes: 15
     name: Analyze
     runs-on: ubuntu-latest
     permissions:
