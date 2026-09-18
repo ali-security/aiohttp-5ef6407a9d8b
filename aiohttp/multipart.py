@@ -25,7 +25,12 @@ from urllib.parse import parse_qsl, unquote, urlencode
 
 from multidict import CIMultiDict, CIMultiDictProxy
 
-from .compression_utils import ZLibCompressor, ZLibDecompressor
+from .abc import AbstractStreamWriter
+from .compression_utils import (
+    DEFAULT_MAX_DECOMPRESS_SIZE,
+    ZLibCompressor,
+    ZLibDecompressor,
+)
 from .hdrs import (
     CONTENT_DISPOSITION,
     CONTENT_ENCODING,
@@ -273,6 +278,7 @@ class BodyPartReader:
         *,
         subtype: str = "mixed",
         default_charset: Optional[str] = None,
+        max_decompress_size: int = DEFAULT_MAX_DECOMPRESS_SIZE,
     ) -> None:
         self.headers = headers
         self._boundary = boundary
@@ -289,6 +295,7 @@ class BodyPartReader:
         self._prev_chunk: Optional[bytes] = None
         self._content_eof = 0
         self._cache: Dict[str, Any] = {}
+        self._max_decompress_size = max_decompress_size
 
     def __aiter__(self: Self) -> Self:
         return self
@@ -519,7 +526,7 @@ class BodyPartReader:
             return ZLibDecompressor(
                 encoding=encoding,
                 suppress_deflate_header=True,
-            ).decompress_sync(data)
+            ).decompress_sync(data, max_length=self._max_decompress_size)
 
         raise RuntimeError(f"unknown content encoding: {encoding}")
 
@@ -590,7 +597,7 @@ class BodyPartReaderPayload(Payload):
         """
         raise TypeError("Unable to read body part as bytes. Use write() to consume.")
 
-    async def write(self, writer: Any) -> None:
+    async def write(self, writer: AbstractStreamWriter) -> None:
         field = self._value
         chunk = await field.read_chunk(size=2**16)
         while chunk:
@@ -1034,7 +1041,9 @@ class MultipartWriter(Payload):
 
         return b"".join(parts)
 
-    async def write(self, writer: Any, close_boundary: bool = True) -> None:
+    async def write(
+        self, writer: AbstractStreamWriter, close_boundary: bool = True
+    ) -> None:
         """Write body."""
         for part, encoding, te_encoding in self._parts:
             if self._is_form_data:
@@ -1088,7 +1097,7 @@ class MultipartWriter(Payload):
 
 
 class MultipartPayloadWriter:
-    def __init__(self, writer: Any) -> None:
+    def __init__(self, writer: AbstractStreamWriter) -> None:
         self._writer = writer
         self._encoding: Optional[str] = None
         self._compress: Optional[ZLibCompressor] = None

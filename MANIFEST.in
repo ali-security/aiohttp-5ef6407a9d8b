@@ -18,4 +18,8 @@ global-exclude *.dll
 global-exclude *.a
 global-exclude *.obj
 exclude aiohttp/*.html
+# CVE-2025-69223: VCS-only helper that re-includes the vendored Brotli
+# ``c/include/`` headers (the root .gitignore's ``include/`` rule would
+# otherwise hide them from git).  It is not part of the distribution.
+exclude aiohttp/_vendored/brotli_src/c/.gitignore
 prune docs/_build

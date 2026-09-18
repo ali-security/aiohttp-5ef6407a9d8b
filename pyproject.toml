@@ -6,6 +6,10 @@ requires = [
     # Don't bump too early to give distributors time to update
     # their setuptools version.
     "setuptools == 80.9.0",
+    # CVE-2025-69223: PyPy wheels compile the vendored brotlicffi backend via
+    # cffi at build time (CPython uses the vendored Brotli C extension instead).
+    "cffi >= 1.0.0; python_version < '3.13' and platform_python_implementation != 'CPython'",
+    "cffi >= 1.17.0; python_version >= '3.13' and platform_python_implementation != 'CPython'",
 ]
 build-backend = "setuptools.build_meta"
 
@@ -70,8 +74,24 @@ include = [
   "aiohttp.*",
 ]
 
+[tool.setuptools.package-data]
+# CVE-2025-69223: ship the vendored Brotli / brotlicffi C source so source
+# installs and sdists can compile the ``aiohttp._vendored._brotli`` extension
+# per-platform. The compiled ``.so`` is a build output and is never shipped.
+"aiohttp._vendored" = [
+  "brotli_src/python/*.c",
+  "brotli_src/c/**/*.c",
+  "brotli_src/c/**/*.h",
+  "brotli_src/LICENSE",
+  "BROTLI_LICENSE",
+]
+
 [tool.setuptools.exclude-package-data]
-"*" = ["*.c", "*.h"]
+# Strip C/H from the package tree EXCEPT the vendored brotli source above.
+# Keyed per-package so the broad ``*`` rule does not re-exclude the vendored
+# tree (later, more-specific keys win).
+aiohttp = ["*.c", "*.h"]
+"aiohttp._websocket" = ["*.c", "*.h"]
 
 [tool.towncrier]
   package = "aiohttp"

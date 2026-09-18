@@ -3,6 +3,7 @@
 import asyncio
 import re
 import sys
+import zlib
 from contextlib import nullcontext
 from typing import Any, Dict, List
 from unittest import mock
@@ -15,6 +16,7 @@ from yarl import URL
 import aiohttp
 from aiohttp import http_exceptions, streams
 from aiohttp.base_protocol import BaseProtocol
+from aiohttp.compression_utils import DEFAULT_MAX_DECOMPRESS_SIZE
 from aiohttp.http_parser import (
     NO_EXTENSIONS,
     DeflateBuffer,
@@ -1798,6 +1800,37 @@ class TestParsePayload:
         assert b"zstd data" == out._buffer[0]
         assert out.is_eof()
 
+    async def test_http_payload_decompression_bomb(
+        self, protocol: BaseProtocol
+    ) -> None:
+        """A decompression bomb does not exhaust memory (CVE-2025-69223).
+
+        The ``auto_decompress`` path used by both the request and the response
+        parser must stop at the configured limit instead of expanding the whole
+        body, so a few kilobytes on the wire cannot turn into gigabytes of RAM.
+        """
+        # 64MiB of a single repeated byte -- twice the default limit -- which
+        # compresses down to a payload small enough to fit in one TCP segment.
+        original = b"A" * (2 * DEFAULT_MAX_DECOMPRESS_SIZE)
+        compressed = zlib.compress(original)
+        assert len(compressed) * 512 < len(original)
+
+        out = aiohttp.StreamReader(protocol, 2**16, loop=asyncio.get_running_loop())
+        p = HttpPayloadParser(
+            out,
+            length=len(compressed),
+            compression="deflate",
+            headers_parser=HeadersParser(),
+        )
+
+        with pytest.raises(
+            http_exceptions.ContentEncodingError, match="Decompressed data exceeds"
+        ):
+            p.feed_data(compressed)
+
+        # The bomb never made it into the stream reader.
+        assert not out._buffer
+
 
 class TestDeflateBuffer:
     async def test_feed_data(self, protocol: BaseProtocol) -> None:
@@ -1886,3 +1919,90 @@ class TestDeflateBuffer:
         dbuf.feed_eof()
 
         assert buf.at_eof()
+
+    @pytest.mark.parametrize(
+        "chunk_size",
+        [1024, 2**14, 2**16],  # 1KB, 16KB, 64KB
+        ids=["1KB", "16KB", "64KB"],
+    )
+    async def test_streaming_decompress_large_payload(
+        self, protocol: BaseProtocol, chunk_size: int
+    ) -> None:
+        """Test that large payloads decompress correctly when streamed in chunks.
+
+        This simulates real HTTP streaming where compressed data arrives in
+        small network chunks. Each chunk's decompressed output should be within
+        the max_decompress_size limit, allowing full recovery of the original data.
+        """
+        # Create a large payload (3MiB) that compresses well
+        original = b"A" * (3 * 2**20)
+        compressed = zlib.compress(original)
+
+        buf = aiohttp.StreamReader(protocol, 2**16, loop=asyncio.get_running_loop())
+        dbuf = DeflateBuffer(buf, "deflate")
+
+        # Feed compressed data in chunks (simulating network streaming)
+        for i in range(0, len(compressed), chunk_size):
+            chunk = compressed[i : i + chunk_size]
+            dbuf.feed_data(chunk, len(chunk))
+
+        dbuf.feed_eof()
+
+        # Read all decompressed data
+        result = b"".join(buf._buffer)
+        assert len(result) == len(original)
+        assert result == original
+
+    @pytest.mark.parametrize(
+        "encoding",
+        [
+            "deflate",
+            "gzip",
+            pytest.param(
+                "br",
+                marks=pytest.mark.skipif(
+                    brotli is None, reason="brotli is not installed"
+                ),
+            ),
+            pytest.param(
+                "zstd",
+                marks=pytest.mark.skipif(
+                    zstandard is None, reason="zstandard is not installed"
+                ),
+            ),
+        ],
+    )
+    async def test_feed_data_decompression_bomb(
+        self, protocol: BaseProtocol, encoding: str
+    ) -> None:
+        """Every supported content-encoding honours the decompression limit.
+
+        CVE-2025-69223: the decompressors used to be driven without a maximum
+        output size, so a tiny body in any of these encodings could be inflated
+        until the host ran out of memory.
+        """
+        limit = 1024
+        original = b"A" * (1024 * limit)  # 1MiB -- 1024x the configured limit
+        if encoding == "br":
+            assert brotli is not None
+            compressed = brotli.compress(original)
+        elif encoding == "zstd":
+            assert zstandard is not None
+            compressed = zstandard.compress(original)
+        elif encoding == "gzip":
+            compressor = zlib.compressobj(wbits=16 + zlib.MAX_WBITS)
+            compressed = compressor.compress(original) + compressor.flush()
+        else:
+            compressed = zlib.compress(original)
+        assert len(compressed) * 100 < len(original)
+
+        buf = aiohttp.StreamReader(protocol, 2**16, loop=asyncio.get_running_loop())
+        dbuf = DeflateBuffer(buf, encoding, max_decompress_size=limit)
+
+        with pytest.raises(
+            http_exceptions.ContentEncodingError, match="Decompressed data exceeds"
+        ):
+            dbuf.feed_data(compressed, len(compressed))
+
+        # The bomb never reached the stream reader.
+        assert not buf._buffer
